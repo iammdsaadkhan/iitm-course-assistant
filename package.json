@@ -1,0 +1,28 @@
+{
+  "name": "pdf-assistant-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "start": "next start --hostname 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/copy-pdf-worker.mjs"
+  },
+  "dependencies": {
+    "@huggingface/inference": "^4.13.30",
+    "next": "^16.3.8",
+    "pdfjs-dist": "5.4.296",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20.16.0"
+  }
+}
