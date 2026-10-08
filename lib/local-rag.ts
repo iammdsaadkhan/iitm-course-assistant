@@ -14,7 +14,7 @@ function words(value: string): string[] {
     .filter((word) => !STOP_WORDS.has(word));
 }
 
-/** A small keyword-overlap search used when no Hugging Face token is configured. */
+/** A small keyword-overlap search used when no AI provider key is configured. */
 export function findLocalMatches(
   question: string,
   chunks: PdfChunk[],
@@ -37,7 +37,7 @@ export function findLocalMatches(
 /** Pick the most question-relevant sentences as a transparent local-mode answer. */
 export function makeExtractiveAnswer(question: string, sources: SourceHit[]): string {
   if (sources.length === 0) {
-    return "I could not find a matching passage. Try different words from the PDF, or enable Hugging Face AI mode for semantic search.";
+    return "I could not find a matching passage. Try different words from the PDF, or enable an AI provider for semantic search.";
   }
 
   const queryWords = [...new Set(words(question))];
