@@ -1,5 +1,7 @@
 import { InferenceClient } from "@huggingface/inference";
 import { NextResponse } from "next/server";
+import { getAIProviderConfig } from "@/lib/ai-provider";
+import { readHuggingFaceEmbeddingRows } from "@/lib/embedding-vectors";
 import type { PdfChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -42,95 +44,45 @@ function readChunks(value: unknown): PdfChunk[] {
   return chunks;
 }
 
-function averageAndNormalize(value: unknown): number[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("The embedding service returned an empty vector.");
-  }
-
-  // Some providers return one pooled vector; others return vectors for each token.
-  let vector: number[];
-  if (typeof value[0] === "number") {
-    vector = value as number[];
-  } else if (Array.isArray(value[0]) && typeof value[0][0] === "number") {
-    const tokenVectors = value as number[][];
-    const dimension = tokenVectors[0].length;
-    vector = Array.from({ length: dimension }, (_, column) =>
-      tokenVectors.reduce((sum, row) => sum + (row[column] ?? 0), 0) / tokenVectors.length,
-    );
-  } else if (Array.isArray(value[0]) && Array.isArray(value[0][0])) {
-    // Handle an extra single-input dimension by flattening one level first.
-    return averageAndNormalize(value.flat() as unknown);
-  } else {
-    throw new Error("The embedding service returned an unexpected vector format.");
-  }
-
-  const length = Math.sqrt(vector.reduce((sum, number) => sum + number * number, 0));
-  if (!Number.isFinite(length) || length === 0) {
-    throw new Error("The embedding service returned an invalid vector.");
-  }
-  return vector.map((number) => number / length);
-}
-
-function readEmbeddingRows(output: unknown, expectedCount: number): number[][] {
-  if (!Array.isArray(output)) {
-    throw new Error("The embedding service returned an unexpected response.");
-  }
-
-  // A single input may be returned as a bare vector or as token vectors.
-  let rows = output;
-  if (expectedCount === 1 && typeof output[0] === "number") {
-    rows = [output];
-  } else if (
-    expectedCount === 1 &&
-    output.length > 1 &&
-    Array.isArray(output[0]) &&
-    typeof output[0][0] === "number"
-  ) {
-    // Wrap token-by-token output as the one input row; averageAndNormalize pools it.
-    rows = [output];
-  }
-  if (rows.length !== expectedCount) {
-    throw new Error("The embedding service returned a different number of vectors than expected.");
-  }
-  return rows.map(averageAndNormalize);
-}
-
 export async function POST(request: Request) {
-  const token = process.env.HF_TOKEN;
-  if (!token) {
+  const config = getAIProviderConfig();
+  if (!config) {
     return NextResponse.json(
-      { error: "Hugging Face AI is not configured. Use local mode or add HF_TOKEN." },
+      { error: "AI is not configured. Add GROQ_API_KEY or HF_TOKEN to your Vercel environment." },
       { status: 503 },
+    );
+  }
+  if (config.provider !== "huggingface" || !config.embeddingModel) {
+    return NextResponse.json(
+      { error: "Groq mode uses built-in keyword retrieval and does not need an embedding request." },
+      { status: 409 },
     );
   }
 
   try {
     const body = (await request.json()) as { chunks?: unknown };
     const chunks = readChunks(body.chunks);
-    const model = process.env.HF_EMBEDDING_MODEL ?? "sentence-transformers/all-MiniLM-L6-v2";
-    const client = new InferenceClient(token);
+    const client = new InferenceClient(config.apiKey);
     const vectors: number[][] = [];
 
-    // Batch calls so large documents stay within provider request limits.
+    // Batch calls so larger documents stay within provider request limits.
     for (let start = 0; start < chunks.length; start += BATCH_SIZE) {
       const batch = chunks.slice(start, start + BATCH_SIZE);
       const output = await client.featureExtraction({
-        model,
+        model: config.embeddingModel,
         provider: "hf-inference",
         inputs: batch.map((chunk) => chunk.text),
         normalize: true,
         truncate: true,
       });
-      vectors.push(...readEmbeddingRows(output, batch.length));
+      vectors.push(...readHuggingFaceEmbeddingRows(output, batch.length));
     }
 
-    return NextResponse.json({ vectors, model });
+    return NextResponse.json({ vectors, model: config.embeddingModel, provider: config.provider });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json(
-      {
-        error: `Could not create document embeddings. Check your Hugging Face token, model access, and inference quota. (${message})`,
-      },
+      { error: `Could not create document embeddings with Hugging Face. ${message}` },
       { status: 502 },
     );
   }

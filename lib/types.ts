@@ -12,7 +12,7 @@ export type SourceHit = {
 
 export type IndexedDocument = {
   chunks: PdfChunk[];
-  mode: "huggingface" | "local";
+  mode: "groq" | "huggingface" | "local";
   vectors?: number[][];
 };
 

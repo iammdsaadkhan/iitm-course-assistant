@@ -9,6 +9,7 @@ const MAX_FILES = 5;
 const MAX_TOTAL_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_CHUNKS = 180;
 const MAX_TEXT_CHARACTERS = 600_000;
+const TOP_K = 4;
 
 const EXAMPLE_QUESTIONS = [
   "What is this document about?",
@@ -18,7 +19,8 @@ const EXAMPLE_QUESTIONS = [
 
 type ServiceStatus = {
   aiEnabled: boolean;
-  embeddingModel: string;
+  provider: "groq" | "huggingface" | "local";
+  searchMethod: string;
   chatModel: string;
 };
 
@@ -28,6 +30,10 @@ function formatSize(size: number): string {
   return size < 1024 * 1024
     ? `${Math.max(1, Math.round(size / 1024))} KB`
     : `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function providerName(provider: ServiceStatus["provider"] | undefined): string {
+  return provider === "groq" ? "Groq" : provider === "huggingface" ? "Hugging Face" : "Local";
 }
 
 function formatAnswer(data: unknown): { answer: string; sources: SourceHit[] } {
@@ -63,7 +69,8 @@ export default function PdfAssistant() {
       .catch(() =>
         setServiceStatus({
           aiEnabled: false,
-          embeddingModel: "Local keyword search",
+          provider: "local",
+          searchMethod: "Keyword search (browser)",
           chatModel: "Extractive answers",
         }),
       );
@@ -152,7 +159,7 @@ export default function PdfAssistant() {
         throw new Error("This PDF set contains too much text for one request. Try a shorter document.");
       }
 
-      if (serviceStatus?.aiEnabled) {
+      if (serviceStatus?.provider === "huggingface") {
         setPhase("embedding");
         setProgress(65);
         const response = await fetch("/api/index", {
@@ -166,8 +173,11 @@ export default function PdfAssistant() {
           throw new Error("The embedding service returned an incomplete index. Please try again.");
         }
         setIndexedDocument({ chunks, vectors: result.vectors, mode: "huggingface" });
+      } else if (serviceStatus?.provider === "groq") {
+        // Groq supplies answer generation; the built-in keyword search finds passages locally.
+        setIndexedDocument({ chunks, mode: "groq" });
       } else {
-        // No API key is needed for this fallback. Text and search stay in the browser.
+        // No AI key is needed for this fallback. Text and search stay in the browser.
         setIndexedDocument({ chunks, mode: "local" });
       }
 
@@ -176,9 +186,12 @@ export default function PdfAssistant() {
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: serviceStatus?.aiEnabled
-            ? `Ready. I indexed ${chunks.length} text sections from ${files.length} PDF${files.length === 1 ? "" : "s"}. Ask me a question and I’ll show the page sources.`
-            : `Ready. I found ${chunks.length} text sections. This deployment is in local mode, so answers use keyword matching. Add an HF_TOKEN in Vercel to enable semantic search and generated answers.`,
+          content:
+            serviceStatus?.provider === "groq"
+              ? `Ready. I found ${chunks.length} text sections. I’ll use keyword-matched passages and Groq AI to answer your questions with page sources.`
+              : serviceStatus?.provider === "huggingface"
+                ? `Ready. I indexed ${chunks.length} text sections from ${files.length} PDF${files.length === 1 ? "" : "s"}. Ask me a question and I’ll use Hugging Face AI to answer with page sources.`
+                : `Ready. I found ${chunks.length} text sections. This deployment is in local mode, so answers use keyword matching. Add GROQ_API_KEY (Groq) or HF_TOKEN (Hugging Face) in Vercel to enable AI answers.`,
         },
       ]);
     } catch (caught) {
@@ -209,13 +222,20 @@ export default function PdfAssistant() {
       let answer: string;
       let sources: SourceHit[];
 
-      if (indexedDocument.mode === "huggingface" && indexedDocument.vectors) {
+      if (
+        indexedDocument.mode === "groq" ||
+        (indexedDocument.mode === "huggingface" && indexedDocument.vectors)
+      ) {
+        const chunksForRequest =
+          indexedDocument.mode === "groq"
+            ? findLocalMatches(cleanQuestion, indexedDocument.chunks, TOP_K).map((hit) => hit.chunk)
+            : indexedDocument.chunks;
         const response = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             question: cleanQuestion,
-            chunks: indexedDocument.chunks,
+            chunks: chunksForRequest,
             vectors: indexedDocument.vectors,
           }),
         });
@@ -257,7 +277,7 @@ export default function PdfAssistant() {
         <div className="topbar-right">
           <span className={`mode-pill ${serviceStatus?.aiEnabled ? "mode-pill-ai" : "mode-pill-local"}`}>
             <span className="status-dot" />
-            {serviceStatus === null ? "Checking setup" : serviceStatus.aiEnabled ? "Hugging Face AI" : "Local mode"}
+            {serviceStatus === null ? "Checking setup" : serviceStatus.aiEnabled ? `${providerName(serviceStatus.provider)} AI` : "Local mode"}
           </span>
           <a className="help-link" href="#how-it-works">How it works</a>
         </div>
@@ -370,22 +390,24 @@ export default function PdfAssistant() {
           {hasIndex && (
             <div className="indexed-note">
               <span className="checkmark">✓</span>
-              <span>{indexedDocument.chunks.length} sections ready · {indexedDocument.mode === "huggingface" ? "semantic search enabled" : "keyword search ready"}</span>
+              <span>{indexedDocument.chunks.length} sections ready · {indexedDocument.mode === "huggingface" ? "semantic search enabled" : indexedDocument.mode === "groq" ? "keyword search + Groq AI" : "keyword search ready"}</span>
             </div>
           )}
 
           <div className="privacy-note">
             <span className="privacy-icon" aria-hidden="true">◈</span>
             <p>
-              {serviceStatus?.aiEnabled
-                ? "PDFs are read in your browser. Text passages and questions go to this app’s API and Hugging Face for AI processing; nothing is saved by this demo."
-                : "Local mode keeps PDF text and search in this browser. Add an HF_TOKEN in Vercel to enable semantic search and AI-generated answers."}
+              {serviceStatus?.provider === "groq"
+                ? "PDFs and full text stay in your browser. Only keyword-matched passages and questions are sent to this app’s API and Groq for answers. Nothing is stored by this demo."
+                : serviceStatus?.provider === "huggingface"
+                  ? "PDFs are read in your browser. Text passages and questions go to this app’s API and Hugging Face for embeddings and AI answers; nothing is saved by this demo."
+                  : "Local mode keeps PDF text and search in this browser. Add GROQ_API_KEY (Groq) or HF_TOKEN (Hugging Face) in Vercel to enable AI-generated answers."}
             </p>
           </div>
           {serviceStatus?.aiEnabled && (
             <details className="model-details">
               <summary>Models in use</summary>
-              <p><b>Embeddings</b><br />{serviceStatus.embeddingModel}</p>
+              <p><b>Search method</b><br />{serviceStatus.searchMethod}</p>
               <p><b>Answer model</b><br />{serviceStatus.chatModel}</p>
             </details>
           )}
@@ -473,7 +495,7 @@ export default function PdfAssistant() {
               <div className="thinking-row">
                 <div className="assistant-avatar" aria-hidden="true">✦</div>
                 <div className="thinking-bubble"><span /><span /><span /></div>
-                <small>{indexedDocument?.mode === "huggingface" ? "Searching passages and composing an answer…" : "Finding matching passages…"}</small>
+                <small>{indexedDocument && indexedDocument.mode !== "local" ? "Searching passages and composing an answer…" : "Finding matching passages…"}</small>
               </div>
             )}
             <div ref={chatEnd} />
@@ -518,7 +540,7 @@ export default function PdfAssistant() {
         <div className="how-grid">
           <div className="how-card"><span>01</span><h3>Read</h3><p>Text is extracted from each page right in your browser. The PDF itself is not uploaded.</p></div>
           <div className="how-card"><span>02</span><h3>Find</h3><p>Text is divided into small overlapping sections. Search finds the best passages for your question.</p></div>
-          <div className="how-card"><span>03</span><h3>Answer</h3><p>In Hugging Face mode, the AI answers from those passages and shows the source pages.</p></div>
+          <div className="how-card"><span>03</span><h3>Answer</h3><p>In AI mode, Groq or Hugging Face answers from those passages and shows the source pages.</p></div>
         </div>
       </section>
 
